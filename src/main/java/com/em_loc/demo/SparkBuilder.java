@@ -1,7 +1,7 @@
 package com.em_loc.demo;
+import org.apache.spark.sql.SparkSession;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
-import org.apache.spark.sql.SparkSession;
 
 @Component
 public class SparkBuilder {

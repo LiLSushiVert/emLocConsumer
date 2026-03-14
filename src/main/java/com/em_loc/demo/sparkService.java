@@ -1,18 +1,18 @@
 package com.em_loc.demo;
 
+import org.apache.spark.sql.SparkSession;
 import org.springframework.stereotype.Service;
 
-
 @Service
-public class sparkService {
-     private final SparkBuilder sparkBuilder;
+public class SparkService {
+
+    private final SparkBuilder sparkBuilder;
 
     public SparkService(SparkBuilder sparkBuilder) {
         this.sparkBuilder = sparkBuilder;
     }
 
-    public void runJob() {
-        SparkSession spark = sparkBuilder.getSparkSession();
-        spark.range(10).show();
+    public SparkSession getSpark() {
+        return sparkBuilder.getSparkSession();
     }
 }
