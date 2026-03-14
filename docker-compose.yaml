@@ -1,0 +1,30 @@
+services:
+  spark-master:
+    image: apache/spark:3.5.0
+    hostname: spark-master
+    command: >
+      /opt/spark/bin/spark-class
+      org.apache.spark.deploy.master.Master
+    ports:
+      - "7077:7077"
+      - "8084:8084"
+
+  spark-worker:
+    image: apache/spark:3.5.0
+    command: >
+      /opt/spark/bin/spark-class
+      org.apache.spark.deploy.worker.Worker
+      spark://spark-master:7077
+    depends_on:
+      - spark-master
+
+  spark-app:
+    image: apache/spark:3.5.0
+    depends_on:
+      - spark-master
+    volumes:
+      - ./job.py:/opt/spark/job.py
+    command: >
+      /opt/spark/bin/spark-submit
+      --master spark://spark-master:7077
+      /opt/spark/job.py

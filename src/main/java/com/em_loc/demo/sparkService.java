@@ -1,8 +1,7 @@
-package com;
+package com.em_loc.demo;
 
 import org.springframework.stereotype.Service;
 
-import com.em_loc.demo.SparkBuilder;
 
 @Service
 public class sparkService {
