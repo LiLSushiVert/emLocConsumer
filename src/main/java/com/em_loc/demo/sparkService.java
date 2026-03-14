@@ -12,7 +12,7 @@ public class SparkService {
         this.sparkBuilder = sparkBuilder;
     }
 
-    public SparkSession getSpark() {
+    public SparkSession getSparkSession() {
         return sparkBuilder.getSparkSession();
     }
 }

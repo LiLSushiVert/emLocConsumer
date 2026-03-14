@@ -1,29 +1,23 @@
 package com.em_loc.demo;
+
 import org.apache.spark.sql.SparkSession;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 @Component
 public class SparkBuilder {
-     private SparkSession spark;
 
-     @Value("${spark.app.name}")
-    private String appName;
-
-    @Value("${spark.master}")
-    private String master;
-
-    @Value("${spark.sql.shuffle.partitions}")
-    private String shufflePartitions;
+    private SparkSession sparkSession;
 
     public SparkSession getSparkSession() {
-        if (spark == null) {
-            spark = SparkSession.builder()
-                    .appName(appName)
-                    .master(master)
-                    .config("spark.sql.shuffle.partitions", shufflePartitions)
+
+        if (sparkSession == null) {
+            sparkSession = SparkSession.builder()
+                    .appName("MySparkApplication")
+                    .master("local[*]")
+                    .config("spark.ui.enabled", "false")
                     .getOrCreate();
         }
-        return spark;
+
+        return sparkSession;
     }
 }
