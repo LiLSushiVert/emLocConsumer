@@ -13,7 +13,7 @@ public class SparkBuilder {
         if (sparkSession == null) {
             sparkSession = SparkSession.builder()
                     .appName("MySparkApplication")
-                    .master("local[*]")
+                    .master("spark://localhost:7077")
                     .config("spark.ui.enabled", "false")
                     .getOrCreate();
         }
