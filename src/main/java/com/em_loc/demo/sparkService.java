@@ -45,97 +45,127 @@ public class SparkService {
                 .option("subscribe", "LOC-VIETCAP-STOCK-DATA-TOPIC")
                 .option("startingOffsets", "latest")
                 .option("maxOffsetsPerTrigger", "2000")
+                .option("failOnDataLoss", "false")
                 .load();
 
-        // =========================
-        // 2. Convert Kafka value -> JSON string
-        // =========================
         Dataset<Row> messages = kafkaStream
                 .selectExpr("CAST(value AS STRING) as json");
 
         // =========================
-        // 3. Define JSON Schema
+        // 2. JSON Schema
         // =========================
         StructType schema = new StructType()
                 .add("co", DataTypes.StringType)
                 .add("s", DataTypes.StringType)
+
+                .add("orgn", DataTypes.StringType)
+                .add("enorgn", DataTypes.StringType)
+
+                .add("st", DataTypes.StringType)
+                .add("bo", DataTypes.StringType)
+
+                .add("ref", DataTypes.IntegerType)
+                .add("op", DataTypes.IntegerType)
                 .add("c", DataTypes.IntegerType)
                 .add("h", DataTypes.IntegerType)
                 .add("l", DataTypes.IntegerType)
-                .add("op", DataTypes.IntegerType)
-                .add("ref", DataTypes.IntegerType)
+
+                .add("cei", DataTypes.IntegerType)
+                .add("flo", DataTypes.IntegerType)
+
                 .add("avgp", DataTypes.DoubleType)
+
                 .add("vo", DataTypes.LongType)
                 .add("va", DataTypes.DoubleType)
-                .add("bo", DataTypes.StringType);
+
+                .add("frbv", DataTypes.LongType)
+                .add("frsv", DataTypes.LongType)
+                .add("frcrr", DataTypes.LongType)
+
+                .add("bp1", DataTypes.StringType)
+                .add("bv1", DataTypes.LongType)
+                .add("bp2", DataTypes.IntegerType)
+                .add("bv2", DataTypes.LongType)
+                .add("bp3", DataTypes.IntegerType)
+                .add("bv3", DataTypes.LongType)
+
+                .add("ap1", DataTypes.IntegerType)
+                .add("av1", DataTypes.LongType)
+                .add("ap2", DataTypes.IntegerType)
+                .add("av2", DataTypes.LongType)
+                .add("ap3", DataTypes.IntegerType)
+                .add("av3", DataTypes.LongType)
+
+                .add("ptv", DataTypes.LongType)
+                .add("pta", DataTypes.LongType);
 
         // =========================
-        // 4. Parse JSON
+        // 3. Parse JSON
         // =========================
         Dataset<Row> parsed = messages
                 .select(from_json(col("json"), schema).alias("data"))
                 .select("data.*");
 
         // =========================
-        // 5. Transform Data
+        // 4. Transform
         // =========================
-        Dataset<Row> transformed = parsed
+        Dataset<Row> transformed = parsed.select(
 
-                .withColumnRenamed("co", "code")
-                .withColumnRenamed("s", "symbol")
-                .withColumnRenamed("c", "close_price")
-                .withColumnRenamed("h", "high_price")
-                .withColumnRenamed("l", "low_price")
-                .withColumnRenamed("op", "open_price")
-                .withColumnRenamed("ref", "ref_price")
-                .withColumnRenamed("avgp", "avg_price")
-                .withColumnRenamed("vo", "volume")
-                .withColumnRenamed("va", "value")
-                .withColumnRenamed("bo", "exchange")
+                col("co").alias("code"),
+                col("s").alias("symbol"),
 
-                // text columns
-                .withColumn("company_name", lit(null).cast("string"))
-                .withColumn("company_name_en", lit(null).cast("string"))
-                .withColumn("stock_type", lit(null).cast("string"))
+                col("orgn").alias("company_name"),
+                col("enorgn").alias("company_name_en"),
 
-                // price columns
-                .withColumn("floor_price", lit(0).cast("double"))
-                .withColumn("ceiling_price", lit(0).cast("double"))
+                col("bo").alias("exchange"),
+                col("st").alias("stock_type"),
 
-                // foreign trade
-                .withColumn("foreign_buy_volume", lit(0L))
-                .withColumn("foreign_sell_volume", lit(0L))
-                .withColumn("foreign_room", lit(0L))
+                col("ref").alias("ref_price"),
+                col("op").alias("open_price"),
+                col("c").alias("close_price"),
+                col("h").alias("high_price"),
+                col("l").alias("low_price"),
 
-                // bid
-                .withColumn("bid_price_1", lit(0).cast("double"))
-                .withColumn("bid_volume_1", lit(0L))
-                .withColumn("bid_price_2", lit(0).cast("double"))
-                .withColumn("bid_volume_2", lit(0L))
-                .withColumn("bid_price_3", lit(0).cast("double"))
-                .withColumn("bid_volume_3", lit(0L))
+                col("flo").alias("floor_price"),
+                col("cei").alias("ceiling_price"),
 
-                // ask
-                .withColumn("ask_price_1", lit(0).cast("double"))
-                .withColumn("ask_volume_1", lit(0L))
-                .withColumn("ask_price_2", lit(0).cast("double"))
-                .withColumn("ask_volume_2", lit(0L))
-                .withColumn("ask_price_3", lit(0).cast("double"))
-                .withColumn("ask_volume_3", lit(0L))
+                col("avgp").alias("avg_price"),
 
-                // put-through
-                .withColumn("put_through_volume", lit(0L))
-                .withColumn("put_through_value", lit(0L));
+                col("vo").alias("volume"),
+                col("va").alias("value"),
+
+                col("frbv").alias("foreign_buy_volume"),
+                col("frsv").alias("foreign_sell_volume"),
+                col("frcrr").alias("foreign_room"),
+
+                col("bp1").cast("int").alias("bid_price_1"),
+                col("bv1").alias("bid_volume_1"),
+                col("bp2").alias("bid_price_2"),
+                col("bv2").alias("bid_volume_2"),
+                col("bp3").alias("bid_price_3"),
+                col("bv3").alias("bid_volume_3"),
+
+                col("ap1").alias("ask_price_1"),
+                col("av1").alias("ask_volume_1"),
+                col("ap2").alias("ask_price_2"),
+                col("av2").alias("ask_volume_2"),
+                col("ap3").alias("ask_price_3"),
+                col("av3").alias("ask_volume_3"),
+
+                col("ptv").alias("put_through_volume"),
+                col("pta").alias("put_through_value"),
+
+                current_timestamp().alias("created_at")
+        );
 
         // =========================
-        // 6. Write Stream → PostgreSQL
+        // 5. Write Stream
         // =========================
         StreamingQuery query = transformed.writeStream()
 
                 .foreachBatch((batchDF, batchId) -> {
 
                     if (batchDF.isEmpty()) {
-                        System.out.println("Batch " + batchId + " empty");
                         return;
                     }
 
@@ -149,7 +179,6 @@ public class SparkService {
                             .option("password", postgresPassword)
                             .option("driver", "org.postgresql.Driver")
                             .option("batchsize", "2000")
-                            .option("numPartitions", "4")
                             .mode("append")
                             .save();
 
@@ -160,13 +189,7 @@ public class SparkService {
                 .option("checkpointLocation", "C:/tmp/spark-checkpoint-stock-ticks")
                 .start();
 
-        // =========================
-        // 7. Start Streaming
-        // =========================
-        System.out.println("=================================");
         System.out.println("Kafka → Spark → PostgreSQL streaming started");
-        System.out.println("Press Ctrl + C to stop");
-        System.out.println("=================================");
 
         query.awaitTermination();
     }
