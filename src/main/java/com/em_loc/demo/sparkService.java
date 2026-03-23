@@ -1,20 +1,23 @@
 package com.em_loc.demo;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
+
+import static org.apache.spark.sql.functions.col;
+import static org.apache.spark.sql.functions.from_json;
+import static org.apache.spark.sql.functions.when;
+
 import org.apache.spark.sql.streaming.StreamingQuery;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructType;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
+
 import redis.clients.jedis.Jedis;
-
-import java.util.ArrayList;
-import java.util.List;
-
-import static org.apache.spark.sql.functions.col;
-import static org.apache.spark.sql.functions.from_json;
 
 @Service
 public class SparkService {
@@ -30,7 +33,7 @@ public class SparkService {
     @Value("${postgres.password}")
     private String postgresPassword;
 
-    private static final String TARGET_TABLE = "market.stock_ticks";
+    private static final String TARGET_TABLE = "market.stock_ticks2";
 
     public SparkService(SparkBuilder sparkBuilder) {
         this.sparkBuilder = sparkBuilder;
@@ -40,7 +43,6 @@ public class SparkService {
 
         SparkSession spark = sparkBuilder.getSparkSession();
 
-        // ================== READ KAFKA ==================
         Dataset<Row> kafkaStream = spark
                 .readStream()
                 .format("kafka")
@@ -58,7 +60,6 @@ public class SparkService {
                 "partition"
         );
 
-        // ================== SCHEMA ==================
         StructType schema = new StructType()
                 .add("co", DataTypes.StringType)
                 .add("s", DataTypes.StringType)
@@ -94,7 +95,6 @@ public class SparkService {
                 .add("ptv", DataTypes.LongType)
                 .add("pta", DataTypes.LongType);
 
-        // ================== PARSE ==================
         Dataset<Row> parsed = messages
                 .select(
                         from_json(col("json"), schema).alias("data"),
@@ -109,7 +109,6 @@ public class SparkService {
                         col("partition")
                 );
 
-        // ================== TRANSFORM ==================
         Dataset<Row> transformed = parsed.select(
                 col("co").alias("code"),
                 col("s").alias("symbol"),
@@ -149,13 +148,11 @@ public class SparkService {
                 col("partition")
         );
 
-        // ================== STREAM PROCESS ==================
         StreamingQuery query = transformed.writeStream()
                 .foreachBatch((batchDF, batchId) -> {
 
                     if (batchDF.isEmpty()) return;
 
-                    // 👉 Check DB empty (1 lần/batch)
                     boolean isDbEmpty = batchDF.sparkSession()
                             .read()
                             .format("jdbc")
@@ -167,12 +164,15 @@ public class SparkService {
                             .limit(1)
                             .count() == 0;
 
-                    List<Row> rows = batchDF.collectAsList();
+                    Dataset<Row> deduped = batchDF
+                            .orderBy(col("created_at").desc())
+                            .dropDuplicates("symbol");
+
+                    List<Row> rows = deduped.collectAsList();
 
                     Jedis jedis = new Jedis("localhost", 6379);
 
                     List<Row> filtered = new ArrayList<>();
-
                     double THRESHOLD = 0.001;
 
                     for (Row row : rows) {
@@ -184,7 +184,6 @@ public class SparkService {
 
                         String key = "stock:" + symbol;
 
-                        // 🚀 CASE 1: DB rỗng → insert toàn bộ
                         if (isDbEmpty) {
                             jedis.set(key, price.toString());
                             filtered.add(row);
@@ -193,7 +192,6 @@ public class SparkService {
 
                         String oldPriceStr = jedis.get(key);
 
-                        // 🚀 CASE 2: chưa có trong Redis
                         if (oldPriceStr == null) {
                             jedis.set(key, price.toString());
                             filtered.add(row);
@@ -201,10 +199,20 @@ public class SparkService {
                         }
 
                         double oldPrice = Double.parseDouble(oldPriceStr);
+
+                        if (oldPrice == 0) {
+                            jedis.set(key, price.toString());
+                            filtered.add(row);
+                            continue;
+                        }
+
+                        if (oldPrice == price) {
+                            continue;
+                        }
+
                         double change = Math.abs(price - oldPrice) / oldPrice;
 
-                        // 🚀 CASE 3: thay đổi đủ lớn
-                        if (change >= THRESHOLD) {
+                        if (change > THRESHOLD) {
                             jedis.set(key, price.toString());
                             filtered.add(row);
                         }
@@ -217,9 +225,24 @@ public class SparkService {
                     Dataset<Row> filteredDF = batchDF.sparkSession()
                             .createDataFrame(filtered, batchDF.schema());
 
-                    long count = filteredDF.count();
+                    Dataset<Row> enrichedDF = filteredDF
+                            .withColumn("change_percent",
+                                    when(col("ref_price").isNotNull().and(col("ref_price").notEqual(0)),
+                                            col("close_price").minus(col("ref_price"))
+                                                    .divide(col("ref_price"))
+                                    ).otherwise(0)
+                            )
+                            .withColumn("range_percent",
+                                    when(col("ref_price").isNotNull().and(col("ref_price").notEqual(0)),
+                                            col("high_price").minus(col("low_price"))
+                                                    .divide(col("ref_price"))
+                                    ).otherwise(0)
+                            )
+                            .withColumn("spread",
+                                    col("ask_price_1").minus(col("bid_price_1"))
+                            );
 
-                    filteredDF.write()
+                    enrichedDF.write()
                             .format("jdbc")
                             .option("url", postgresUrl)
                             .option("dbtable", TARGET_TABLE)
@@ -229,8 +252,6 @@ public class SparkService {
                             .option("batchsize", "2000")
                             .mode("append")
                             .save();
-
-                    System.out.println("Batch " + batchId + " inserted: " + count);
 
                 })
                 .outputMode("append")
