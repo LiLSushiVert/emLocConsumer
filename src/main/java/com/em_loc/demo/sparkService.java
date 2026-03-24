@@ -1,19 +1,24 @@
 package com.em_loc.demo;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.Properties;
+
+import org.apache.kafka.clients.admin.AdminClient;
+import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.clients.producer.KafkaProducer;
 
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
 
-import static org.apache.spark.sql.functions.col;
-import static org.apache.spark.sql.functions.from_json;
-import static org.apache.spark.sql.functions.when;
+import static org.apache.spark.sql.functions.*;
 
 import org.apache.spark.sql.streaming.StreamingQuery;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructType;
+
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -34,6 +39,7 @@ public class SparkService {
     private String postgresPassword;
 
     private static final String TARGET_TABLE = "market.stock_ticks2";
+    private static final String ALERT_TOPIC = "stock-alerts";
 
     public SparkService(SparkBuilder sparkBuilder) {
         this.sparkBuilder = sparkBuilder;
@@ -43,8 +49,7 @@ public class SparkService {
 
         SparkSession spark = sparkBuilder.getSparkSession();
 
-        Dataset<Row> kafkaStream = spark
-                .readStream()
+        Dataset<Row> kafkaStream = spark.readStream()
                 .format("kafka")
                 .option("kafka.bootstrap.servers", "localhost:9095")
                 .option("subscribe", "LOC-VIETCAP-STOCK-DATA-TOPIC")
@@ -56,8 +61,7 @@ public class SparkService {
         Dataset<Row> messages = kafkaStream.selectExpr(
                 "CAST(value AS STRING) as json",
                 "timestamp",
-                "offset",
-                "partition"
+                "offset"
         );
 
         StructType schema = new StructType()
@@ -99,15 +103,9 @@ public class SparkService {
                 .select(
                         from_json(col("json"), schema).alias("data"),
                         col("timestamp"),
-                        col("offset"),
-                        col("partition")
+                        col("offset")
                 )
-                .select(
-                        col("data.*"),
-                        col("timestamp"),
-                        col("offset"),
-                        col("partition")
-                );
+                .select(col("data.*"), col("timestamp"), col("offset"));
 
         Dataset<Row> transformed = parsed.select(
                 col("co").alias("code"),
@@ -144,8 +142,7 @@ public class SparkService {
                 col("ptv").alias("put_through_volume"),
                 col("pta").alias("put_through_value"),
                 col("timestamp").alias("created_at"),
-                col("offset").alias("offsetkafka"),
-                col("partition")
+                col("offset").alias("offsetkafka")
         );
 
         StreamingQuery query = transformed.writeStream()
@@ -170,88 +167,106 @@ public class SparkService {
 
                     List<Row> rows = deduped.collectAsList();
 
-                    Jedis jedis = new Jedis("localhost", 6379);
+                    try (Jedis jedis = new Jedis("localhost", 6379)) {
 
-                    List<Row> filtered = new ArrayList<>();
-                    double THRESHOLD = 0.001;
+                        // create topic if not exists
+                        Properties adminProps = new Properties();
+                        adminProps.put("bootstrap.servers", "localhost:9095");
 
-                    for (Row row : rows) {
+                        try (AdminClient admin = AdminClient.create(adminProps)) {
+                            admin.createTopics(
+                                    Collections.singleton(new NewTopic(ALERT_TOPIC, 1, (short) 1))
+                            );
+                        } catch (Exception ignored) {}
 
-                        String symbol = row.getAs("symbol");
-                        Integer price = row.getAs("close_price");
+                        Properties producerProps = new Properties();
+                        producerProps.put("bootstrap.servers", "localhost:9095");
+                        producerProps.put("key.serializer", "org.apache.kafka.common.serialization.StringSerializer");
+                        producerProps.put("value.serializer", "org.apache.kafka.common.serialization.StringSerializer");
 
-                        if (symbol == null || price == null) continue;
+                        try (KafkaProducer<String, String> producer = new KafkaProducer<>(producerProps)) {
 
-                        String key = "stock:" + symbol;
+                            List<Row> filtered = new ArrayList<>();
+                            double THRESHOLD = 0.001;
 
-                        if (isDbEmpty) {
-                            jedis.set(key, price.toString());
-                            filtered.add(row);
-                            continue;
-                        }
+                            for (Row row : rows) {
 
-                        String oldPriceStr = jedis.get(key);
+                                String symbol = row.getAs("symbol");
+                                Integer price = row.getAs("close_price");
 
-                        if (oldPriceStr == null) {
-                            jedis.set(key, price.toString());
-                            filtered.add(row);
-                            continue;
-                        }
+                                if (symbol == null || price == null) continue;
 
-                        double oldPrice = Double.parseDouble(oldPriceStr);
+                                String key = "stock:" + symbol;
 
-                        if (oldPrice == 0) {
-                            jedis.set(key, price.toString());
-                            filtered.add(row);
-                            continue;
-                        }
+                                if (isDbEmpty) {
+                                    jedis.set(key, price.toString());
+                                    filtered.add(row);
+                                    continue;
+                                }
 
-                        if (oldPrice == price) {
-                            continue;
-                        }
+                                String oldPriceStr = jedis.get(key);
 
-                        double change = Math.abs(price - oldPrice) / oldPrice;
+                                if (oldPriceStr == null) {
+                                    jedis.set(key, price.toString());
+                                    filtered.add(row);
+                                    continue;
+                                }
 
-                        if (change > THRESHOLD) {
-                            jedis.set(key, price.toString());
-                            filtered.add(row);
+                                double oldPrice = Double.parseDouble(oldPriceStr);
+
+                                if (oldPrice == price) continue;
+
+                                double change = Math.abs(price - oldPrice) / oldPrice;
+
+                                if (change > THRESHOLD) {
+                                    jedis.set(key, price.toString());
+                                    filtered.add(row);
+                                }
+                            }
+
+                            if (filtered.isEmpty()) return;
+
+                            Dataset<Row> filteredDF = batchDF.sparkSession()
+                                    .createDataFrame(filtered, batchDF.schema());
+
+                            Dataset<Row> enrichedDF = filteredDF
+                                    .withColumn("change_percent",
+                                            round(
+                                                    when(col("ref_price").isNotNull().and(col("ref_price").notEqual(0)),
+                                                            col("close_price").minus(col("ref_price"))
+                                                                    .divide(col("ref_price"))
+                                                                    .multiply(100)
+                                                    ).otherwise(0), 2)
+                                    )
+                                    .withColumn("range_percent",
+                                            round(
+                                                    when(col("ref_price").isNotNull().and(col("ref_price").notEqual(0)),
+                                                            col("high_price").minus(col("low_price"))
+                                                                    .divide(col("ref_price"))
+                                                                    .multiply(100)
+                                                    ).otherwise(0), 2)
+                                    )
+                                    .withColumn("price_direction",
+                                            when(col("close_price").gt(col("ref_price")), "UP")
+                                                    .when(col("close_price").lt(col("ref_price")), "DOWN")
+                                                    .otherwise("FLAT")
+                                    )
+                                    .withColumn("spread",
+                                            col("ask_price_1").minus(col("bid_price_1"))
+                                    );
+
+                            enrichedDF.write()
+                                    .format("jdbc")
+                                    .option("url", postgresUrl)
+                                    .option("dbtable", TARGET_TABLE)
+                                    .option("user", postgresUser)
+                                    .option("password", postgresPassword)
+                                    .option("driver", "org.postgresql.Driver")
+                                    .option("batchsize", "2000")
+                                    .mode("append")
+                                    .save();
                         }
                     }
-
-                    jedis.close();
-
-                    if (filtered.isEmpty()) return;
-
-                    Dataset<Row> filteredDF = batchDF.sparkSession()
-                            .createDataFrame(filtered, batchDF.schema());
-
-                    Dataset<Row> enrichedDF = filteredDF
-                            .withColumn("change_percent",
-                                    when(col("ref_price").isNotNull().and(col("ref_price").notEqual(0)),
-                                            col("close_price").minus(col("ref_price"))
-                                                    .divide(col("ref_price"))
-                                    ).otherwise(0)
-                            )
-                            .withColumn("range_percent",
-                                    when(col("ref_price").isNotNull().and(col("ref_price").notEqual(0)),
-                                            col("high_price").minus(col("low_price"))
-                                                    .divide(col("ref_price"))
-                                    ).otherwise(0)
-                            )
-                            .withColumn("spread",
-                                    col("ask_price_1").minus(col("bid_price_1"))
-                            );
-
-                    enrichedDF.write()
-                            .format("jdbc")
-                            .option("url", postgresUrl)
-                            .option("dbtable", TARGET_TABLE)
-                            .option("user", postgresUser)
-                            .option("password", postgresPassword)
-                            .option("driver", "org.postgresql.Driver")
-                            .option("batchsize", "2000")
-                            .mode("append")
-                            .save();
 
                 })
                 .outputMode("append")
