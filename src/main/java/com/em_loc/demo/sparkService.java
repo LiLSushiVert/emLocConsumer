@@ -128,7 +128,29 @@ public class SparkService {
                             .withColumn("trade_type",
                                  when(col("close_price").geq(col("ask_price_1")), "BUY_ACTIVE")
                                 .when(col("close_price").leq(col("bid_price_1")), "SELL_ACTIVE")
-                                .otherwise("NEUTRAL"));
+                                .otherwise("NEUTRAL"))
+
+                            // ==================== 4 CỘT MỚI – ĐÃ FIX NULL HOÀN TOÀN ====================
+                            .withColumn("dist_to_vwap_pct",
+                                round(when(col("avg_price").isNotNull().and(col("avg_price").gt(0)),
+                                    col("close_price").cast("double").minus(col("avg_price"))
+                                        .divide(col("avg_price")).multiply(100))
+                                    .otherwise(0), 2))
+
+                            .withColumn("dist_to_floor_pct",
+                                round(when(col("floor_price").isNotNull().and(col("floor_price").gt(0)),
+                                    col("close_price").cast("double").minus(col("floor_price"))
+                                        .divide(col("floor_price")).multiply(100))
+                                    .otherwise(0), 2))
+
+                            .withColumn("dist_to_ceiling_pct",
+                                round(when(col("ceiling_price").isNotNull().and(col("ceiling_price").gt(0)),
+                                    col("ceiling_price").cast("double").minus(col("close_price"))
+                                        .divide(col("ceiling_price")).multiply(100))
+                                    .otherwise(0), 2))
+
+                            .withColumn("intraday_vol_pct",
+                                round(coalesce(col("volume").cast("double").divide(1000000.0), lit(0.0)), 2));
 
                         // Save to Postgres
                         enrichedDF.write().format("jdbc")
@@ -136,7 +158,7 @@ public class SparkService {
                                 .option("user", postgresUser).option("password", postgresPassword)
                                 .mode("append").save();
 
-                        // Push to Job 2 Kafka
+                        // Push to Kafka CLEAN
                         enrichedDF.select(to_json(struct(col("*"))).alias("value"))
                                 .write().format("kafka")
                                 .option("kafka.bootstrap.servers", bootstrapServers)
