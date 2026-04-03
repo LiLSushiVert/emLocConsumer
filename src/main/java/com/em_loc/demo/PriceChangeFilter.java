@@ -4,18 +4,20 @@ import org.apache.spark.sql.Row;
 import redis.clients.jedis.Jedis;
 
 public class PriceChangeFilter {
-    private static final double THRESHOLD = 0.005; 
+    private static final double THRESHOLD = 0.001; 
 
     public boolean shouldEmit(Jedis jedis, Row row, boolean isDbEmpty) {
         String symbol = row.getAs("symbol");
         Integer currentPrice = row.getAs("close_price");
         Long currentVolume = row.getAs("volume");
 
-        if (symbol == null || currentPrice == null || currentVolume == null) return false;
+        if (symbol == null || currentPrice == null || currentVolume == null) {
+            return false;
+        }
 
         String key = "stock_state:" + symbol;
+        
         String oldData = jedis.get(key);
-
         if (isDbEmpty || oldData == null) {
             saveToRedis(jedis, key, currentPrice, currentVolume);
             return true;
