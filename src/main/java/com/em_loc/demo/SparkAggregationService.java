@@ -24,7 +24,7 @@ public class SparkAggregationService {
 
     private static final String SOURCE_TOPIC = "CLEAN-STOCK-DATA";
     private static final String INSIGHT_TABLE = "market.stock_insights";
-    private static final String INSIGHTS_TOPIC = "STOCK-INSIGHTS-TOPIC";   // ← Topic mới
+    private static final String INSIGHTS_TOPIC = "STOCK-INSIGHTS-TOPIC";
 
     public SparkAggregationService(SparkBuilder sparkBuilder) {
         this.sparkBuilder = sparkBuilder;
@@ -33,7 +33,7 @@ public class SparkAggregationService {
     public StreamingQuery startAggregation() throws Exception {
         SparkSession spark = sparkBuilder.getSparkSession();
 
-        // Schema từ Job 1
+        // Schema đầy đủ hơn, thêm change_percent
         StructType schema = new StructType()
                 .add("symbol", "string")
                 .add("close_price", "integer")
@@ -46,6 +46,7 @@ public class SparkAggregationService {
                 .add("ask_volume_2", "long")
                 .add("ask_volume_3", "long")
                 .add("trade_type", "string")
+                .add("change_percent", "double")
                 .add("created_at", "timestamp");
 
         Dataset<Row> stream = spark.readStream()
@@ -55,7 +56,9 @@ public class SparkAggregationService {
                 .option("startingOffsets", "latest")
                 .option("failOnDataLoss", "false")
                 .load()
-                .select(from_json(col("value").cast("string"), schema).alias("data"))
+                .select(from_json(col("value").cast("string"), schema, 
+                        java.util.Collections.singletonMap("allowUnmatched", "true"))
+                        .alias("data"))
                 .select("data.*");
 
         return stream.writeStream()
@@ -66,7 +69,6 @@ public class SparkAggregationService {
                         return;
                     }
 
-                    // Lấy snapshot mới nhất của mỗi symbol
                     Dataset<Row> latest = batchDF
                             .orderBy(col("created_at").desc())
                             .dropDuplicates("symbol");
@@ -110,10 +112,11 @@ public class SparkAggregationService {
                                 col("buy_active_ratio"),
                                 col("money_flow"),
                                 col("price_pos"),
-                                col("net_volume")
+                                col("net_volume"),
+                                coalesce(col("change_percent"), lit(0.0)).alias("change_percent")   // ← Bảo vệ null
                             );
 
-                    // Ghi vào database
+                    // Ghi Postgres
                     insights.write()
                             .format("jdbc")
                             .option("url", postgresUrl)
@@ -124,7 +127,7 @@ public class SparkAggregationService {
                             .mode("append")
                             .save();
 
-                    // ==================== PUSH KAFKA CHO JOB 3 ====================
+                    // Push Kafka cho Job 3
                     insights.select(to_json(struct(col("*"))).alias("value"))
                             .write()
                             .format("kafka")
@@ -133,7 +136,7 @@ public class SparkAggregationService {
                             .save();
 
                     System.out.println("✅ [JOB 2] Batch " + batchId + " → " + insights.count() 
-                            + " symbols → Postgres + Kafka (" + INSIGHTS_TOPIC + ") | " + java.time.LocalDateTime.now());
+                            + " symbols → Postgres + Kafka | " + java.time.LocalDateTime.now());
                 })
                 .option("checkpointLocation", "D:/spark-checkpoint-job2-" + LocalDate.now())
                 .start();
