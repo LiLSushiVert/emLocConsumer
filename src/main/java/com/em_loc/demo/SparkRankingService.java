@@ -3,9 +3,12 @@ package com.em_loc.demo;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.expressions.Window;
 import org.apache.spark.sql.streaming.StreamingQuery;
 import org.apache.spark.sql.types.StructType;
+
 import static org.apache.spark.sql.functions.*;
+
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -31,7 +34,6 @@ public class SparkRankingService {
     public StreamingQuery startRankingJob() throws Exception {
         SparkSession spark = sparkBuilder.getSparkSession();
 
-        // Schema từ Job 2 (đã có change_percent)
         StructType schema = new StructType()
                 .add("window_time", "timestamp")
                 .add("symbol", "string")
@@ -64,89 +66,114 @@ public class SparkRankingService {
         return stream.writeStream()
                 .trigger(org.apache.spark.sql.streaming.Trigger.ProcessingTime("2 seconds"))
                 .foreachBatch((batchDF, batchId) -> {
-                    if (batchDF.isEmpty()) return;
 
-                    Dataset<Row> enriched = batchDF
-                            // Bảo vệ null cho change_percent
+                    if (batchDF.isEmpty()) {
+                        System.out.println("⚪ [JOB 3] Batch " + batchId + " empty");
+                        return;
+                    }
+
+                    // Dedup latest per symbol
+                    Dataset<Row> deduped = batchDF
+                            .withColumn("rn", row_number()
+                                    .over(Window.partitionBy("symbol")
+                                            .orderBy(col("window_time").desc())))
+                            .where(col("rn").equalTo(1))
+                            .drop("rn");
+
+                    Dataset<Row> enriched = deduped
                             .withColumn("change_percent", coalesce(col("change_percent"), lit(0.0)))
 
-                            // ==================== MOMENTUM SCORE ====================
+                            // Normalize buy_active_ratio
+                            .withColumn("buy_active_ratio_norm",
+                                    col("buy_active_ratio").multiply(2).minus(1))
+
+                            // price_pos
+                            .withColumn("price_pos",
+                                    when(col("close_price").gt(col("avg_price")), lit(1.0))
+                                            .otherwise(lit(0.0)))
+
+                            // Momentum score
                             .withColumn("momentum_score",
-                                col("obi_score").multiply(0.45)
-                                    .plus(col("buy_active_ratio").multiply(0.35))
-                                    .plus(col("price_pos").multiply(0.20)))
+                                    col("obi_score").multiply(0.6)
+                                            .plus(col("buy_active_ratio_norm").multiply(0.3))
+                                            .plus(col("price_pos").multiply(0.1)))
 
-                            // ==================== INSIGHT STRENGTH ====================
+                            // Insight strength
                             .withColumn("insight_strength",
-                                col("momentum_score").multiply(55)
-                                    .plus(col("obi_score").multiply(20))
-                                    .plus(col("buy_active_ratio").multiply(12))
-                                    .plus(col("volume").cast("double").divide(1000000).multiply(0.4))
-                                    .plus(when(col("change_percent").gt(0),
-                                            col("change_percent").multiply(1.5))
-                                        .otherwise(col("change_percent").multiply(0.8))))
-                            .withColumn("insight_strength", round(col("insight_strength"), 2))
+                                    round(
+                                        col("momentum_score").multiply(100)
+                                            .plus(col("volume").cast("double").divide(1000000).multiply(0.5))
+                                            .plus(col("change_percent").multiply(1.2))
+                                    , 2))
 
-                            // ==================== INSIGHT LABEL - CÂN BẰNG BUY & SELL ====================
+                            // Insight label
                             .withColumn("insight_label",
-                                // BUY SIDE
-                                when(col("insight_strength").geq(78)
-                                        .and(col("obi_score").geq(0.50))
-                                        .and(col("buy_active_ratio").geq(0.70)), lit("HOT_BUY"))
-                                .when(col("insight_strength").geq(60)
-                                        .and(col("obi_score").geq(0.38)), lit("BUY_SIGNAL"))
-                                .when(col("obi_score").geq(0.42)
-                                        .and(col("buy_active_ratio").geq(0.50)), lit("WATCHLIST_BUY"))
+                                    when(col("obi_score").geq(0.7)
+                                            .and(col("momentum_score").geq(0.6)), lit("HOT_BUY"))
+                                    .when(col("obi_score").geq(0.5)
+                                            .and(col("insight_strength").geq(50)), lit("BUY_SIGNAL"))
+                                    .when(col("obi_score").geq(0.35)
+                                            .and(col("momentum_score").geq(0.45)), lit("WATCHLIST_BUY"))
+                                    .when(col("obi_score").leq(-0.7)
+                                            .and(col("momentum_score").leq(-0.6)), lit("HOT_SELL"))
+                                    .when(col("obi_score").leq(-0.5)
+                                            .and(col("insight_strength").leq(40)), lit("SELL_SIGNAL"))
+                                    .when(col("obi_score").leq(-0.35)
+                                            .and(col("momentum_score").leq(-0.45)), lit("WATCHLIST_SELL"))
+                                    .otherwise(lit("NEUTRAL")))
 
-                                // SELL SIDE
-                                .when(col("insight_strength").leq(22)
-                                        .and(col("obi_score").leq(-0.48)), lit("HOT_SELL"))
-                                .when(col("insight_strength").leq(35)
-                                        .and(col("obi_score").leq(-0.40)), lit("SELL_SIGNAL"))
-                                .when(col("obi_score").leq(-0.32), lit("WATCHLIST_SELL"))
-
-                                .otherwise(lit("NEUTRAL")))
-
-                            // ==================== REASON ====================
+                            // Reason
                             .withColumn("reason",
-                                when(col("insight_label").equalTo("HOT_BUY"),
-                                    lit("Giá đang rất mạnh + Order book nghiêng mua rõ rệt → Có thể mua theo momentum"))
-                                .when(col("insight_label").equalTo("BUY_SIGNAL"),
-                                    lit("Có tín hiệu mua tích cực → Nên theo dõi và cân nhắc mua, ưu tiên chờ giá về gần avg_price"))
-                                .when(col("insight_label").equalTo("WATCHLIST_BUY"),
-                                    lit("Đang có dấu hiệu mua tích cực → Đáng theo dõi để mua"))
+                                    when(col("insight_label").equalTo("HOT_BUY"),
+                                            lit("Order book mua mạnh + momentum xác nhận"))
+                                    .when(col("insight_label").equalTo("BUY_SIGNAL"),
+                                            lit("Tín hiệu mua tích cực"))
+                                    .when(col("insight_label").equalTo("WATCHLIST_BUY"),
+                                            lit("Đang có dấu hiệu mua"))
+                                    .when(col("insight_label").equalTo("HOT_SELL"),
+                                            lit("Order book bán mạnh + momentum xác nhận"))
+                                    .when(col("insight_label").equalTo("SELL_SIGNAL"),
+                                            lit("Tín hiệu bán mạnh"))
+                                    .when(col("insight_label").equalTo("WATCHLIST_SELL"),
+                                            lit("Áp lực bán tăng"))
+                                    .otherwise(lit("Chưa rõ xu hướng")))
 
-                                .when(col("insight_label").equalTo("HOT_SELL"),
-                                    lit("Bán mạnh + Order book nghiêng bán rõ → Có thể bán tại giá hiện tại hoặc chờ hồi nhẹ"))
-                                .when(col("insight_label").equalTo("SELL_SIGNAL"),
-                                    lit("Có dấu hiệu bán mạnh → Nên cân nhắc chốt lời hoặc cắt lỗ"))
-                                .when(col("insight_label").equalTo("WATCHLIST_SELL"),
-                                    lit("Đang có áp lực bán → Cần theo dõi sát, có thể bán nếu tiếp tục yếu"))
+                            // Final action
+                            .withColumn("final_action",
+                                    when(col("obi_score").gt(0.65)
+                                            .and(col("change_percent").gt(0))
+                                            .and(col("price_pos").equalTo(1.0)), lit("MOMENTUM_BUY"))
+                                    .when(col("obi_score").gt(0.65)
+                                            .and(col("change_percent").lt(0)), lit("ABSORPTION_BUY"))
+                                    .when(col("obi_score").lt(-0.65)
+                                            .and(col("change_percent").gt(0)), lit("DISTRIBUTION_SELL"))
+                                    .when(col("obi_score").lt(-0.65)
+                                            .and(col("change_percent").lt(0))
+                                            .and(col("price_pos").equalTo(0.0)), lit("MOMENTUM_SELL"))
+                                    .otherwise(lit("NEUTRAL")))
 
-                                .otherwise(lit("Chưa có tín hiệu rõ ràng, nên theo dõi thêm")))
+                            // Contextual reason
+                            .withColumn("contextual_reason",
+                                    when(col("final_action").equalTo("MOMENTUM_BUY"),
+                                            lit("Mua mạnh + giá tăng → momentum"))
+                                    .when(col("final_action").equalTo("ABSORPTION_BUY"),
+                                            lit("Mua mạnh nhưng giá giảm → hấp thụ"))
+                                    .when(col("final_action").equalTo("DISTRIBUTION_SELL"),
+                                            lit("Bán mạnh nhưng giá tăng → phân phối"))
+                                    .when(col("final_action").equalTo("MOMENTUM_SELL"),
+                                            lit("Bán mạnh + giá giảm → xu hướng giảm"))
+                                    .otherwise(lit("Chưa rõ tín hiệu")))
 
                             .withColumn("created_at", current_timestamp());
 
-                    // Loại bỏ bản ghi trùng
-                    enriched = enriched.dropDuplicates("window_time", "symbol");
-
-                    // Ghi vào bảng stock_dashboard (đã có change_percent)
+                    // ==================== WRITE TO POSTGRES (KHÔNG CÒN count() nữa) ====================
                     enriched.select(
-                            col("window_time"),
-                            col("created_at"),
-                            col("symbol"),
-                            col("obi_score"),
-                            col("buy_active_ratio"),
-                            col("net_volume"),
-                            col("money_flow"),
-                            col("price_pos"),
-                            col("signal"),
-                            col("liquidity_status"),
-                            col("momentum_score"),
-                            col("insight_strength"),
-                            col("insight_label"),
-                            col("reason"),
-                            col("change_percent")          // ← Thêm cột này vì anh đã alter table
+                            col("window_time"), col("created_at"), col("symbol"),
+                            col("obi_score"), col("buy_active_ratio"), col("net_volume"),
+                            col("money_flow"), col("price_pos"), col("signal"),
+                            col("liquidity_status"), col("momentum_score"),
+                            col("insight_strength"), col("insight_label"), col("reason"),
+                            col("change_percent"), col("final_action"), col("contextual_reason")
                     ).write()
                             .format("jdbc")
                             .option("url", postgresUrl)
@@ -157,8 +184,9 @@ public class SparkRankingService {
                             .mode("append")
                             .save();
 
-                    System.out.println("✅ [JOB 3 FINAL] Batch " + batchId 
-                            + " → " + enriched.count() + " rows | " + java.time.LocalDateTime.now());
+                    System.out.println("✅ [JOB 3] Batch " + batchId + " → " + enriched.count() 
+                            + " rows written to DB | " + java.time.LocalDateTime.now());
+
                 })
                 .option("checkpointLocation", "D:/spark-checkpoint-job3-final-" + LocalDate.now())
                 .start();

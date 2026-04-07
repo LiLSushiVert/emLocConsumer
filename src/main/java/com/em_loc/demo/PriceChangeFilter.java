@@ -4,7 +4,8 @@ import org.apache.spark.sql.Row;
 import redis.clients.jedis.Jedis;
 
 public class PriceChangeFilter {
-    private static final double THRESHOLD = 0.001; 
+
+    private static final double THRESHOLD = 0.001;
 
     public boolean shouldEmit(Jedis jedis, Row row, boolean isDbEmpty) {
         String symbol = row.getAs("symbol");

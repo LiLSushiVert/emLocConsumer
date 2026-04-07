@@ -3,6 +3,7 @@ package com.em_loc.demo;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.expressions.Window;
 import org.apache.spark.sql.streaming.StreamingQuery;
 import org.apache.spark.sql.streaming.Trigger;
 import org.apache.spark.sql.types.StructType;
@@ -69,9 +70,13 @@ public class SparkAggregationService {
                         return;
                     }
 
+                    // ==================== FIX DEDUP - LẤY RECORD MỚI NHẤT CHẮC CHẮN ====================
                     Dataset<Row> latest = batchDF
-                            .orderBy(col("created_at").desc())
-                            .dropDuplicates("symbol");
+                            .withColumn("rn", row_number()
+                                .over(Window.partitionBy("symbol")
+                                             .orderBy(col("created_at").desc())))
+                            .where(col("rn").equalTo(1))
+                            .drop("rn");
 
                     Dataset<Row> insights = latest
                             .withColumn("total_bid", col("bid_volume_1").plus(col("bid_volume_2")).plus(col("bid_volume_3")))
@@ -113,7 +118,7 @@ public class SparkAggregationService {
                                 col("money_flow"),
                                 col("price_pos"),
                                 col("net_volume"),
-                                coalesce(col("change_percent"), lit(0.0)).alias("change_percent")   // ← Bảo vệ null
+                                coalesce(col("change_percent"), lit(0.0)).alias("change_percent")
                             );
 
                     // Ghi Postgres

@@ -12,10 +12,13 @@ import static org.apache.spark.sql.functions.*;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import redis.clients.jedis.Jedis;
+import redis.clients.jedis.JedisPool;
 
 @Service
 public class SparkService {
+
     private final SparkBuilder sparkBuilder;
+    private final JedisPool jedisPool;
 
     @Value("${postgres.url}") private String postgresUrl;
     @Value("${postgres.user}") private String postgresUser;
@@ -26,8 +29,9 @@ public class SparkService {
     private static final String SOURCE_TOPIC = "LOC-VIETCAP-STOCK-DATA-TOPIC";
     private static final String CLEAN_DATA_TOPIC = "CLEAN-STOCK-DATA";
 
-    public SparkService(SparkBuilder sparkBuilder) {
+    public SparkService(SparkBuilder sparkBuilder, JedisPool jedisPool) {
         this.sparkBuilder = sparkBuilder;
+        this.jedisPool = jedisPool;
     }
 
     public StreamingQuery readKafka() throws Exception {
@@ -56,7 +60,7 @@ public class SparkService {
                 .format("kafka")
                 .option("kafka.bootstrap.servers", bootstrapServers)
                 .option("subscribe", SOURCE_TOPIC)
-                .option("startingOffsets", "earliest")
+                .option("startingOffsets", "latest")
                 .load();
 
         Dataset<Row> transformed = kafkaStream
@@ -105,14 +109,18 @@ public class SparkService {
                     Dataset<Row> latestPerSymbol = batchDF.orderBy(col("created_at").desc()).dropDuplicates("symbol");
                     List<Row> rows = latestPerSymbol.collectAsList();
                     List<Row> filteredRows = new ArrayList<>();
-                    PriceChangeFilter filter = new PriceChangeFilter();
 
-                    try (Jedis jedis = new Jedis("localhost", 6379)) {
+                    try (Jedis jedis = jedisPool.getResource()) {
+                        jedis.getClient().setSoTimeout(30000);
+                        PriceChangeFilter filter = new PriceChangeFilter();
                         for (Row r : rows) {
                             if (filter.shouldEmit(jedis, r, false)) {
                                 filteredRows.add(r);
                             }
                         }
+                    } catch (Exception e) {
+                        System.err.println("⚠️ Redis error batch " + batchId + ": " + e.getMessage());
+                        filteredRows.addAll(rows); // fallback
                     }
 
                     if (!filteredRows.isEmpty()) {

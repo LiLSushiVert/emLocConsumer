@@ -26,7 +26,7 @@ public class DemoApplication {
                 StreamingQuery query2 = aggregationService.startAggregation();
 
                 System.out.println("🏆 [JOB 3] Starting Scoring & Ranking...");
-                rankingService.startRankingJob();
+                StreamingQuery query3 = rankingService.startRankingJob();
 
                 System.out.println("✅ Cả 3 Job Streaming & Batch đã được khởi chạy song song.");
                 

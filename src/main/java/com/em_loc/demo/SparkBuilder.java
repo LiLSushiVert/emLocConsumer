@@ -1,28 +1,43 @@
 package com.em_loc.demo;
 
 import org.apache.spark.sql.SparkSession;
-import org.springframework.stereotype.Component;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
 
-@Component
+@Configuration
 public class SparkBuilder {
 
-    private SparkSession sparkSession;
-
+    @Bean(destroyMethod = "stop")
     public SparkSession getSparkSession() {
+        return SparkSession.builder()
+                .appName("Stock-Insights-Spark-Streaming")
+                .master("local[*]")
 
-        if (sparkSession == null) {
+                // ==================== FIX LỖI RENAME + WINDOWS ====================
+                .config("spark.local.dir", "D:/spark-tmp")
+                .config("spark.sql.shuffle.partitions", "20")
+                .config("spark.file.transferTo", "false")
+                .config("spark.shuffle.io.maxRetries", "10")
+                .config("spark.shuffle.io.retryWait", "5s")
+                .config("spark.shuffle.sort.bypassMergeThreshold", "200")
 
-            sparkSession = SparkSession.builder()
-                    .appName("MySparkApplication")
-                    .master("local[*]")                
-                    .config("spark.jars.packages",
-                            "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1")                
-                    .config("spark.executor.memory", "1g")
-                    .config("spark.driver.memory", "1g")
-                    .config("spark.ui.enabled", "false")
-                    .getOrCreate();
-        }
+                // ==================== MEMORY ====================
+                .config("spark.memory.fraction", "0.7")
+                .config("spark.memory.storageFraction", "0.3")
+                .config("spark.driver.memory", "4g")
+                .config("spark.executor.memory", "4g")
 
-        return sparkSession;
+                // ==================== STREAMING ====================
+                .config("spark.streaming.backpressure.enabled", "true")
+                .config("spark.streaming.kafka.maxRatePerPartition", "1000")
+
+                // ==================== TẮT SPARK UI (FIX LỖI HIỆN TẠI) ====================
+                .config("spark.ui.enabled", "false")
+
+                // Tùy chọn khác (khuyến nghị)
+                .config("spark.sql.adaptive.enabled", "true")
+                .config("spark.ui.showConsoleProgress", "false")
+
+                .getOrCreate();
     }
 }
